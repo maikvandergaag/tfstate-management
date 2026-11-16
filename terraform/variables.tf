@@ -93,16 +93,6 @@ variable "identities" {
   }
 }
 
-variable "storage_account_resource_id" {
-  type        = string
-  description = "Global storage account resource ID used for container-scoped Storage Blob Data Contributor role assignments"
-
-  validation {
-    condition     = can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Storage/storageAccounts/[^/]+$", var.storage_account_resource_id))
-    error_message = "storage_account_resource_id must be an Azure storage account resource ID like '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>'."
-  }
-}
-
 variable "environment" {
   type        = string
   description = "The environment identifier (e.g., 'dev', 'tst', 'acc', 'prd')"

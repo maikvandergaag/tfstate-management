@@ -8,7 +8,6 @@ locals {
       managed_identity_name        = "id-${identity.name}-${var.locationshort}-${var.environment}"
       tags                         = identity.tags
       storage_blob_container_name  = identity.storage_blob_container_name
-      storage_blob_container_scope = "${trimprefix(var.storage_account_resource_id, "/")}/blobServices/default/containers/${identity.storage_blob_container_name}"
       federated_credentials        = identity.federated_credentials
     }
   ]
