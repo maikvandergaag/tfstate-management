@@ -4,7 +4,6 @@
 resource_group_name         = "identities"
 environment                 = "prd"
 locationshort               = "weu"
-storage_account_resource_id = "/subscriptions/60182d51-2810-425e-b75a-c2692503a1a2/resourceGroups/rg-terraformstatebackend-weu-prd/providers/Microsoft.Storage/storageAccounts/stterraformstatebweuprd"
 
 tags = {
   environment = "prod"
