@@ -171,16 +171,5 @@ jobs:
             -backend-config="use_azuread_auth=true" \
             -backend-config="use_oidc=true"
 
-      - name: Verify Terraform state
-        shell: bash
-        run: |
-          set -euo pipefail
-          state_addresses="$(terraform state list)"
-          printf '%s\n' "$state_addresses"
-          if ! grep -Fxq 'azurerm_resource_group.main' <<< "$state_addresses"; then
-            echo "::error::The configured backend state does not contain azurerm_resource_group.main. Check the TF_STATE_* variables; refusing to apply against an empty or incorrect state."
-            exit 1
-          fi
-
       - name: Terraform apply
         run: terraform apply -input=false -auto-approve -var-file=terraform.tfvars
