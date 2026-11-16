@@ -1,6 +1,6 @@
 locals {
 
-  rg_name = "gaag-rg-${var.resource_group_name}-${var.locationshort}-${var.environment}"
+  rg_name = "gaag-rg-identity"
 
   identity_configs = [
     for identity in var.identities : {
