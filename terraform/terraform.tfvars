@@ -19,7 +19,7 @@ identities = [
       purpose = "id for deploying and maintaining the terraform backend"
       owner   = "maik@familie-vandergaag.nl"
     }
-    storage_blob_container_name = "tfstateidentities"
+    storage_blob_container_name = "tfstate"
     federated_credentials = [
       {
         name      = "github-platform-environment"
@@ -35,7 +35,7 @@ identities = [
       purpose = "id for deploying and maintaining the terraform backend"
       owner   = "maik@familie-vandergaag.nl"
     }
-    storage_blob_container_name = "tfstateidentities"
+    storage_blob_container_name = "tfstateaisolution"
     federated_credentials = [
       {
         name      = "github-development-environment"
