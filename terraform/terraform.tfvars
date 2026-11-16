@@ -41,7 +41,13 @@ identities = [
       {
         name      = "github-development-environment"
         issuer    = "https://token.actions.githubusercontent.com"
-        subject   = "repo:maikvandergaag/azure-ai-solution:environment:Development"
+        subject   = "repo:maikvandergaag@9531411/azure-ai-solution@1459603384:environment:Development"
+        audiences = ["api://AzureADTokenExchange"]
+      },
+      {
+        name      = "github-development-apply-environment"
+        issuer    = "https://token.actions.githubusercontent.com"
+        subject   = "repo:maikvandergaag@9531411/azure-ai-solution@1459603384:environment:Development-Apply"
         audiences = ["api://AzureADTokenExchange"]
       }
     ]
