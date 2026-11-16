@@ -1,0 +1,266 @@
+name: Deploy to Azure
+run-name: "${{ github.ref_name }} - ${{ inputs.action }} - Development"
+
+on:
+    workflow_dispatch:
+        inputs:
+            action:
+                description: Action
+                required: true
+                default: plan
+                type: choice
+                options: [plan, apply, destroy]
+
+permissions:
+    contents: read
+
+concurrency:
+    group: deploy-azure
+    cancel-in-progress: false
+
+env:
+    TERRAFORM_WORKING_DIR: infra/terraform/app
+    TERRAFORM_VERSION: 1.16.4
+
+jobs:
+    terraform-plan:
+        name: Plan Development
+        runs-on: ubuntu-latest
+        environment: Development
+        permissions:
+            id-token: write
+            contents: read
+        env:
+            TF_IN_AUTOMATION: true
+            ARM_USE_OIDC: true
+            ARM_USE_AZUREAD: true
+            ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+            ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+            ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+            TF_STATE_SUBSCRIPTION_ID: ${{ vars.TF_STATE_SUBSCRIPTION_ID }}
+            TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+            TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+            TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+            TERRAFORM_VAR_FILE: environment/dev.tfvars
+            TF_STATE_KEY: ibex-infra-dev.tfstate
+            TARGET_ENVIRONMENT: Development
+            TF_VAR_postgres_admin_password: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+            TF_VAR_webui_secret_key: ${{ secrets.WEBUI_SECRET_KEY }}
+            TF_VAR_certificate_pfx_base64: ${{ secrets.CERTIFICATE_PFX_BASE64 }}
+            ACTION: ${{ inputs.action }}
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            # Empty variables do not fail by themselves: the login and init errors they cause point
+            # nowhere near the cause. Fail early and name the missing variable instead.
+            - name: Check environment configuration
+              run: |
+                  set -euo pipefail
+                  missing=()
+                  [ -n "$ARM_CLIENT_ID" ]       || missing+=("AZURE_CLIENT_ID")
+                  [ -n "$ARM_TENANT_ID" ]       || missing+=("AZURE_TENANT_ID")
+                  [ -n "$ARM_SUBSCRIPTION_ID" ] || missing+=("AZURE_SUBSCRIPTION_ID")
+                  [ -n "$TF_STATE_SUBSCRIPTION_ID" ] || missing+=("TF_STATE_SUBSCRIPTION_ID")
+                  [ -n "$TF_STATE_RESOURCE_GROUP" ] || missing+=("TF_STATE_RESOURCE_GROUP")
+                  [ -n "$TF_STATE_STORAGE_ACCOUNT" ] || missing+=("TF_STATE_STORAGE_ACCOUNT")
+                  [ -n "$TF_STATE_CONTAINER" ] || missing+=("TF_STATE_CONTAINER")
+                  if [ "${#missing[@]}" -gt 0 ]; then
+                    echo "::error::Environment '$TARGET_ENVIRONMENT' is missing variables: ${missing[*]}."
+                    exit 1
+                  fi
+                  if [ ! -f "$TERRAFORM_WORKING_DIR/$TERRAFORM_VAR_FILE" ]; then
+                    echo "::error::$TERRAFORM_WORKING_DIR/$TERRAFORM_VAR_FILE does not exist."
+                    exit 1
+                  fi
+
+            - name: Azure login
+              uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+              with:
+                  client-id: ${{ vars.AZURE_CLIENT_ID }}
+                  tenant-id: ${{ vars.AZURE_TENANT_ID }}
+                  subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+            - name: Set up Terraform
+              uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+              with:
+                  terraform_version: ${{ env.TERRAFORM_VERSION }}
+                  terraform_wrapper: false
+
+            # The state key is environment-specific, so it is supplied here rather than hardcoded in
+            # backend.tf.
+            - name: Terraform Init
+              working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+              run: |
+                  terraform init -input=false \
+                    -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP" \
+                    -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+                    -backend-config="container_name=$TF_STATE_CONTAINER" \
+                    -backend-config="key=$TF_STATE_KEY" \
+                    -backend-config="subscription_id=$TF_STATE_SUBSCRIPTION_ID" \
+                    -backend-config="use_azuread_auth=true" \
+                    -backend-config="use_oidc=true"
+
+            - name: Terraform Plan
+              id: plan
+              working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+              run: |
+                  set -euo pipefail
+                  destroy_flag=()
+                  if [ "$ACTION" = "destroy" ]; then destroy_flag=(-destroy); fi
+                  # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present.
+                  status=0
+                  terraform plan -input=false "${destroy_flag[@]}" -var-file="$TERRAFORM_VAR_FILE" -out=tfplan -detailed-exitcode || status=$?
+                  case "$status" in
+                    0) has_changes=false ;;
+                    2) has_changes=true ;;
+                    *) exit "$status" ;;
+                  esac
+                  echo "$has_changes" > has-changes
+                  echo "has_changes=$has_changes" >> "$GITHUB_OUTPUT"
+
+            # This summary is what the reviewer of the -Apply environment approves.
+            - name: Publish plan summary
+              working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+              env:
+                  HAS_CHANGES: ${{ steps.plan.outputs.has_changes }}
+              run: |
+                  set -euo pipefail
+                  terraform show -no-color tfplan > plan.txt
+                  summary_line="$(grep -E '^(Plan:|No changes\.)' plan.txt | tail -n 1 || true)"
+                  {
+                    echo "## Terraform $ACTION plan - $TARGET_ENVIRONMENT"
+                    echo
+                    echo "**${summary_line:-See the full plan below.}**"
+                    echo
+                    if [ "$ACTION" = "plan" ]; then
+                      echo "Plan only: nothing will be changed."
+                    elif [ "$HAS_CHANGES" = "true" ]; then
+                      echo "Review the changes below before approving \`${TARGET_ENVIRONMENT}-Apply\`."
+                    elif [ "$ACTION" = "apply" ]; then
+                      echo "No infrastructure changes. Approving \`${TARGET_ENVIRONMENT}-Apply\` will import the API definition."
+                    else
+                      echo "Nothing to destroy."
+                    fi
+                    echo
+                    echo "<details><summary>Full plan</summary>"
+                    echo
+                    echo '```'
+                    # The step summary is capped at 1 MiB.
+                    head -c 900000 plan.txt
+                    echo '```'
+                    echo "</details>"
+                  } >> "$GITHUB_STEP_SUMMARY"
+                  rm -f plan.txt
+
+            # The saved plan is applied as-is after approval, so the reviewer approves exactly what is
+            # shown above. Terraform refuses it if the state changed in the meantime.
+            - name: Upload plan
+              if: inputs.action != 'plan'
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: tfplan-d
+                  path: |
+                      ${{ env.TERRAFORM_WORKING_DIR }}/tfplan
+                      ${{ env.TERRAFORM_WORKING_DIR }}/has-changes
+                  retention-days: 5
+                  if-no-files-found: error
+
+    terraform-apply:
+        name: ${{ inputs.action == 'destroy' && 'Destroy' || 'Apply' }} Development
+        needs: terraform-plan
+        if: inputs.action != 'plan'
+        runs-on: ubuntu-latest
+        # The required reviewers on this environment are the approval step between plan and apply.
+        environment: Development-Apply
+        permissions:
+            id-token: write
+            contents: read
+        env:
+            TF_IN_AUTOMATION: true
+            ARM_USE_OIDC: true
+            ARM_USE_AZUREAD: true
+            ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+            ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+            ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+            TF_STATE_SUBSCRIPTION_ID: ${{ vars.TF_STATE_SUBSCRIPTION_ID }}
+            TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+            TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+            TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+            TF_STATE_KEY: ibex-infra-dev.tfstate
+            TARGET_ENVIRONMENT: Development
+            TF_VAR_postgres_admin_password: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+            TF_VAR_webui_secret_key: ${{ secrets.WEBUI_SECRET_KEY }}
+            TF_VAR_certificate_pfx_base64: ${{ secrets.CERTIFICATE_PFX_BASE64 }}
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Check environment configuration
+              run: |
+                  set -euo pipefail
+                  missing=()
+                  [ -n "$ARM_CLIENT_ID" ]       || missing+=("AZURE_CLIENT_ID")
+                  [ -n "$ARM_TENANT_ID" ]       || missing+=("AZURE_TENANT_ID")
+                  [ -n "$ARM_SUBSCRIPTION_ID" ] || missing+=("AZURE_SUBSCRIPTION_ID")
+                  [ -n "$TF_STATE_SUBSCRIPTION_ID" ] || missing+=("TF_STATE_SUBSCRIPTION_ID")
+                  [ -n "$TF_STATE_RESOURCE_GROUP" ] || missing+=("TF_STATE_RESOURCE_GROUP")
+                  [ -n "$TF_STATE_STORAGE_ACCOUNT" ] || missing+=("TF_STATE_STORAGE_ACCOUNT")
+                  [ -n "$TF_STATE_CONTAINER" ] || missing+=("TF_STATE_CONTAINER")
+                  if [ "${#missing[@]}" -gt 0 ]; then
+                    echo "::error::Environment '$TARGET_ENVIRONMENT-Apply' is missing variables: ${missing[*]}."
+                    exit 1
+                  fi
+
+            - name: Azure login
+              uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+              with:
+                  client-id: ${{ vars.AZURE_CLIENT_ID }}
+                  tenant-id: ${{ vars.AZURE_TENANT_ID }}
+                  subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+            - name: Set up Terraform
+              uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+              with:
+                  terraform_version: ${{ env.TERRAFORM_VERSION }}
+                  terraform_wrapper: false
+
+            - name: Terraform Init
+              working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+              run: |
+                  terraform init -input=false \
+                    -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP" \
+                    -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+                    -backend-config="container_name=$TF_STATE_CONTAINER" \
+                    -backend-config="key=$TF_STATE_KEY" \
+                    -backend-config="subscription_id=$TF_STATE_SUBSCRIPTION_ID" \
+                    -backend-config="use_azuread_auth=true" \
+                    -backend-config="use_oidc=true"
+
+            - name: Download approved plan
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  name: tfplan-d
+                  path: ${{ env.TERRAFORM_WORKING_DIR }}
+
+            - name: Read plan result
+              id: plan
+              working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+              run: echo "has_changes=$(cat has-changes)" >> "$GITHUB_OUTPUT"
+
+            - name: Terraform Apply
+              if: steps.plan.outputs.has_changes == 'true'
+              working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+              run: terraform apply -input=false tfplan
+
+            - name: Import OpenAI API definition
+              if: inputs.action == 'apply'
+              working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+              run: |
+                  set -euo pipefail
+                  az apim api import \
+                    --resource-group "$(terraform output -raw hub_resource_group_name)" \
+                    --service-name "$(terraform output -raw apim_name)" \
+                    --api-id openai --path "openai/v1" \
+                    --specification-format OpenApiJson --specification-path ../assets/openai.openapi.json \
+                    --display-name "Azure OpenAI v1 API" --protocols https --subscription-required false

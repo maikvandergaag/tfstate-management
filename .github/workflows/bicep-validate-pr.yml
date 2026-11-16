@@ -1,0 +1,38 @@
+name: Validate Bicep on PR
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'bicep/**/*.bicep'
+      - 'bicep/**/*.bicepparam'
+      - '.github/workflows/bicep-validate-pr.yml'
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  validate-bicep:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Bicep Linting
+        uses: maikvandergaag/action-biceplint@eb2b9f7ad1f4909e56b16f0eb258b6bc9eab38f2 # v1.0.1
+        with:
+          allfiles: true
+          create-sarif: true
+          markdown-report: false
+          sarif-output-path: bicep-lint.sarif
+          markdown-output-path: bicep-lint.md
+
+      - name: Upload SARIF file
+        if: always()
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: bicep-lint.sarif
+          category: bicep-linting

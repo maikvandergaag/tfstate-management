@@ -1,0 +1,175 @@
+name: Deploy State Configuration
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'bicep/**/*.bicep'
+      - 'bicep/**/*.bicepparam'
+      - 'bicepconfig.json'
+      - 'terraform/**/*.tf'
+      - 'terraform/**/*.tfvars'
+      - '.github/workflows/deploy-state-config.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-state-config
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: 1.16.4
+
+jobs:
+  deploy:
+    name: Deploy terraform state backend
+    runs-on: ubuntu-latest
+    environment: platform
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_OBJECT_ID: ${{ secrets.AZURE_OBJECT_ID }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$AZURE_CLIENT_ID" ] || missing+=("AZURE_CLIENT_ID")
+          [ -n "$AZURE_TENANT_ID" ] || missing+=("AZURE_TENANT_ID")
+          [ -n "$AZURE_SUBSCRIPTION_ID" ] || missing+=("AZURE_SUBSCRIPTION_ID")
+          [ -n "$AZURE_OBJECT_ID" ] || missing+=("AZURE_OBJECT_ID")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Environment 'platform' is missing secrets: ${missing[*]}."
+            exit 1
+          fi
+          if [ ! -f ./bicep/terraformbackend/main.bicepparam ]; then
+            echo "::error::./bicep/terraformbackend/main.bicepparam does not exist."
+            exit 1
+          fi
+
+      - name: Azure login (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy as Deployment Stack
+        shell: bash
+        run: |
+
+          STACK_NAME="terraform-state-stack"
+          LOCATION="westeurope"
+          OBJECTID="$AZURE_OBJECT_ID"
+          PARAMETERS_FILE="./bicep/terraformbackend/main.bicepparam"
+
+          echo "Creating or updating deployment stack: ${STACK_NAME}"
+
+          az stack sub create \
+            --name "${STACK_NAME}" \
+            --location "${LOCATION}" \
+            --parameters "${PARAMETERS_FILE}" \
+            --deny-settings-mode DenyWriteAndDelete \
+            --action-on-unmanage detachAll \
+            --deny-settings-apply-to-child-scopes \
+            --deny-settings-excluded-principals "${OBJECTID}"
+
+          echo "Deployment stack '${STACK_NAME}' deployed successfully"
+
+  apply-terraform:
+    name: Apply Terraform
+    runs-on: ubuntu-latest
+    environment: platform
+    needs: deploy
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TF_IN_AUTOMATION: true
+      ARM_USE_OIDC: true
+      ARM_USE_AZUREAD: true
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_STATE_SUBSCRIPTION_ID: ${{ vars.TF_STATE_SUBSCRIPTION_ID }}
+      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+      TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check Terraform configuration
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$AZURE_CLIENT_ID" ] || missing+=("AZURE_CLIENT_ID")
+          [ -n "$AZURE_TENANT_ID" ] || missing+=("AZURE_TENANT_ID")
+          [ -n "$AZURE_SUBSCRIPTION_ID" ] || missing+=("AZURE_SUBSCRIPTION_ID")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Environment 'platform' is missing secrets: ${missing[*]}."
+            exit 1
+          fi
+          missing=()
+          [ -n "$TF_STATE_SUBSCRIPTION_ID" ] || missing+=("TF_STATE_SUBSCRIPTION_ID")
+          [ -n "$TF_STATE_RESOURCE_GROUP" ] || missing+=("TF_STATE_RESOURCE_GROUP")
+          [ -n "$TF_STATE_STORAGE_ACCOUNT" ] || missing+=("TF_STATE_STORAGE_ACCOUNT")
+          [ -n "$TF_STATE_CONTAINER" ] || missing+=("TF_STATE_CONTAINER")
+          [ -n "$TF_STATE_KEY" ] || missing+=("TF_STATE_KEY")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Environment 'platform' is missing variables: ${missing[*]}."
+            exit 1
+          fi
+          if [ ! -f terraform.tfvars ]; then
+            echo "::error::terraform/terraform.tfvars does not exist."
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure login (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TF_STATE_CONTAINER" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="subscription_id=$TF_STATE_SUBSCRIPTION_ID" \
+            -backend-config="use_azuread_auth=true" \
+            -backend-config="use_oidc=true"
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve -var-file=terraform.tfvars
