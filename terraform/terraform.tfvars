@@ -4,6 +4,7 @@
 resource_group_name         = "identities"
 environment                 = "prd"
 locationshort               = "weu"
+storage_account_resource_id = "/subscriptions/5b389701-0e47-4738-b4fe-ddb67ac3a036/resourceGroups/gaag-rg-tfstatebackend-weu-prd/providers/Microsoft.Storage/storageAccounts/sttfstatebackendweuprd"
 
 tags = {
   environment = "prod"
